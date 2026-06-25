@@ -162,24 +162,31 @@ enum ProcessorType {
 fn determine_processor(path: &Path) -> Result<ProcessorType, FileError> {
 	let mime = ContentType::from_path(path).mime_type();
 	let FileParts { extension, .. } = path.file_parts();
+	let ext = extension.to_lowercase();
 
 	tracing::debug!(
 		?path,
 		?mime,
-		?extension,
+		?ext,
 		"Determining processor type for entry"
 	);
 
-	match (mime.as_str(), extension.to_lowercase().as_str()) {
-		("application/zip" | "application/vnd.comicbook+zip", ext) if ext != "epub" => {
+	match (mime.as_str(), ext.as_str()) {
+		// Exclude "pdf" alongside "epub" — PDFs may be misidentified as ZIPs by infer
+		("application/zip" | "application/vnd.comicbook+zip", e)
+			if e != "epub" && e != "pdf" =>
+		{
 			Ok(ProcessorType::Zip)
 		},
-		("application/vnd.rar" | "application/vnd.comicbook-rar", _) => {
+		// Exclude "pdf" from RAR routing for the same reason
+		("application/vnd.rar" | "application/vnd.comicbook-rar", e) if e != "pdf" => {
 			Ok(ProcessorType::Rar)
 		},
 		("application/epub+zip", _) => Ok(ProcessorType::Epub),
+		// Trust .epub extension even when infer detects zip bytes
 		("application/zip", "epub") => Ok(ProcessorType::Epub),
-		("application/pdf", _) => Ok(ProcessorType::Pdf),
+		// Trust application/pdf mime OR .pdf extension (mirrors the epub/zip fix pattern)
+		("application/pdf", _) | (_, "pdf") => Ok(ProcessorType::Pdf),
 		_ => Err(FileError::UnsupportedFileType(path.display().to_string())),
 	}
 }
@@ -560,6 +567,20 @@ mod tests {
 		assert!(
 			matches!(result.unwrap(), ProcessorType::Epub),
 			"EPUB with .epub extension should be detected as EPUB even with zip mime type"
+		);
+	}
+
+	/// Mirrors the epub/zip fix test — a file with ZIP magic bytes but a .pdf extension
+	/// should still be routed to the PDF processor, not the ZIP processor.
+	#[test]
+	fn test_determine_processor_pdf_with_zip_mime() {
+		let pdf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+			.join("integration-tests/data/book-zip-mime.pdf");
+		let result = determine_processor(&pdf_path);
+		assert!(result.is_ok());
+		assert!(
+			matches!(result.unwrap(), ProcessorType::Pdf),
+			"PDF with .pdf extension should be detected as PDF even when bytes look like ZIP"
 		);
 	}
 
