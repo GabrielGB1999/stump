@@ -87,26 +87,55 @@ impl FileProcessor for PdfProcessor {
 	}
 
 	fn process_metadata(path: &str) -> Result<Option<ProcessedMediaMetadata>, FileError> {
-		let file = FileOptions::cached()
+		match FileOptions::cached()
 			.parse_options(ParseOptions::tolerant())
-			.open(path)?;
-
-		Ok(file.trailer.info_dict.map(ProcessedMediaMetadata::from))
+			.open(path)
+		{
+			Ok(file) => Ok(file.trailer.info_dict.map(ProcessedMediaMetadata::from)),
+			Err(e) => {
+				// Metadata is non-essential — log and soft-fail rather than aborting the scan.
+				// PDFs with missing/corrupt xref tables commonly hit this path.
+				tracing::warn!(
+					path,
+					error = ?e,
+					"pdf crate failed to parse PDF for metadata; metadata will be unavailable"
+				);
+				Ok(None)
+			},
+		}
 	}
 
 	fn process(
 		path: &str,
 		options: FileProcessorOptions,
-		_: &StumpConfig,
+		config: &StumpConfig,
 	) -> Result<ProcessedFile, FileError> {
-		let file = FileOptions::cached()
-			.parse_options(ParseOptions::tolerant())
-			.open(path)?;
-
-		let pages = file.pages().count() as i32;
 		// Note: The metadata is already parsed by the PDF library, so might as well use it
 		// PDF metadata is generally poop though
-		let metadata = file.trailer.info_dict.map(ProcessedMediaMetadata::from);
+		let (pages, metadata) = match FileOptions::cached()
+			.parse_options(ParseOptions::tolerant())
+			.open(path)
+		{
+			Ok(file) => {
+				let pages = file.pages().count() as i32;
+				let metadata = file.trailer.info_dict.map(ProcessedMediaMetadata::from);
+				(pages, metadata)
+			},
+			Err(e) => {
+				// pdf crate failed (e.g. missing/corrupt xref table). Fall back to PDFium,
+				// which is more tolerant of malformed PDFs (same engine Chromium uses).
+				tracing::warn!(
+					path,
+					error = ?e,
+					"pdf crate failed to open PDF; falling back to PDFium for page count"
+				);
+				let pdfium = PdfProcessor::renderer(&config.pdfium_path)?;
+				let document = pdfium.load_pdf_from_file(path, None)?;
+				let pages = document.pages().len();
+				(pages, None)
+			},
+		};
+
 		let ProcessedFileHashes {
 			hash,
 			koreader_hash,
